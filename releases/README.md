@@ -2,7 +2,7 @@
 
 This folder contains the prebuilt binaries from the latest release, committed directly to the repository for users who cannot reach the GitHub Releases page.
 
-Current version: **v0.5.0**
+Current version: **v0.5.1**
 
 | File | Platform | Contents |
 |---|---|---|
@@ -13,6 +13,8 @@ Current version: **v0.5.0**
 | `mhrv-rs-macos-arm64.tar.gz` | macOS Apple Silicon | `mhrv-rs`, `mhrv-rs-ui`, `run.sh`, `run.command` |
 | `mhrv-rs-macos-arm64-app.zip` | macOS Apple Silicon | `mhrv-rs.app` bundle (double-click from Finder) |
 | `mhrv-rs-windows-amd64.zip` | Windows x86_64 | `mhrv-rs.exe`, `mhrv-rs-ui.exe`, `run.bat` |
+| `mhrv-rs-linux-musl-amd64.tar.gz` | OpenWRT / Alpine x86_64 | static `mhrv-rs` + `mhrv-rs.init` (procd) |
+| `mhrv-rs-linux-musl-arm64.tar.gz` | OpenWRT / Alpine aarch64 | static `mhrv-rs` + `mhrv-rs.init` (procd) |
 
 ## Download via git clone
 
@@ -47,7 +49,7 @@ See the [main README](../README.md) for full setup (Apps Script deployment, conf
 
 این پوشه شامل فایل‌های آخرین نسخه است و مستقیماً در ریپو قرار گرفته برای کاربرانی که به صفحهٔ GitHub Releases دسترسی ندارند.
 
-نسخهٔ فعلی: **v0.5.0**
+نسخهٔ فعلی: **v0.5.1**
 
 ### دانلود از طریق ZIP
 
