@@ -14,22 +14,16 @@ use crate::config::Config;
 use crate::domain_fronter::DomainFronter;
 use crate::mitm::MitmCertManager;
 
+// Domains that are served from Google's core frontend IP pool and therefore
+// respond correctly when we connect to `google_ip` with SNI=`front_domain`
+// and Host=<the real domain>. Kept conservative: anything on a separate CDN
+// (googlevideo, ytimg, doubleclick, etc.) is DROPPED because routing to the
+// wrong backend breaks rather than helps. Those fall through to the normal
+// MITM+relay path, where they'll work (slower) through Apps Script.
 const SNI_REWRITE_SUFFIXES: &[&str] = &[
     "youtube.com",
     "youtu.be",
     "youtube-nocookie.com",
-    "youtubeeducation.com",
-    "googlevideo.com",
-    "ytimg.com",
-    "ggpht.com",
-    "gvt1.com",
-    "gvt2.com",
-    "doubleclick.net",
-    "googlesyndication.com",
-    "googleadservices.com",
-    "google-analytics.com",
-    "googletagmanager.com",
-    "googletagservices.com",
     "fonts.googleapis.com",
 ];
 
@@ -229,6 +223,11 @@ fn parse_request_head(head: &[u8]) -> Option<(String, String, String, Vec<(Strin
     let method = parts.next()?.to_string();
     let target = parts.next()?.to_string();
     let version = parts.next().unwrap_or("HTTP/1.1").to_string();
+
+    if !is_valid_http_method(&method) {
+        return None;
+    }
+
     let mut headers = Vec::new();
     for l in lines {
         if l.is_empty() {
@@ -239,6 +238,21 @@ fn parse_request_head(head: &[u8]) -> Option<(String, String, String, Vec<(Strin
         }
     }
     Some((method, target, version, headers))
+}
+
+fn is_valid_http_method(m: &str) -> bool {
+    matches!(
+        m,
+        "GET"
+            | "POST"
+            | "PUT"
+            | "DELETE"
+            | "HEAD"
+            | "OPTIONS"
+            | "PATCH"
+            | "TRACE"
+            | "CONNECT"
+    )
 }
 
 // ---------- CONNECT handling ----------
