@@ -24,6 +24,11 @@ start_service() {
     procd_set_param stdout 1
     procd_set_param stderr 1
     procd_set_param file "$CONFIG"
+    # Issue #8 — OpenWRT's default fd limit is tiny (often 1024 and sometimes
+    # as low as 256 on constrained devices). A browser's parallel sub-resource
+    # burst fills it in seconds and accept(2) starts returning EMFILE. 16k is
+    # plenty for a local proxy and costs virtually no kernel memory.
+    procd_set_param limits nofile="16384 16384"
     procd_close_instance
 }
 

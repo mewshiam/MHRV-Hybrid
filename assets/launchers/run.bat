@@ -19,12 +19,40 @@ if errorlevel 1 (
     echo but HTTPS sites may show certificate warnings until the CA is trusted.
 )
 
-if exist "mhrv-rs-ui.exe" (
-    echo Starting mhrv-rs UI...
-    start "" "mhrv-rs-ui.exe"
-) else (
+if not exist "mhrv-rs-ui.exe" (
     echo UI binary not found. Running CLI proxy instead.
     mhrv-rs.exe
+    goto :eof
+)
+
+echo.
+echo Starting mhrv-rs UI...
+echo (A new window should open. If nothing appears, the UI crashed — the
+echo  error is shown in this terminal below. Take a screenshot of it and
+echo  open an issue on github.)
+echo.
+
+REM Run in-place (not via `start`) so if the UI dies on launch, its stderr
+REM and non-zero exit code are visible in this window. Previously we used
+REM `start "" "mhrv-rs-ui.exe"` which returns immediately and swallows any
+REM launch-time crash (issue #7).
+mhrv-rs-ui.exe
+set UI_EXIT=%ERRORLEVEL%
+if not "%UI_EXIT%"=="0" (
+    echo.
+    echo ---------------------------------------------------
+    echo UI exited with error code %UI_EXIT%.
+    echo.
+    echo If this is the first time and you just saw the UI crash immediately,
+    echo common causes on Windows are:
+    echo   - missing or outdated graphics drivers (try updating)
+    echo   - running inside RDP or a VM without GPU acceleration
+    echo   - antivirus blocking the exe — whitelist the folder and retry
+    echo.
+    echo Copy everything above and open an issue on:
+    echo   https://github.com/therealaleph/MasterHttpRelayVPN-RUST/issues
+    echo ---------------------------------------------------
+    pause
 )
 
 endlocal

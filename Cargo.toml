@@ -1,6 +1,6 @@
 [package]
 name = "mhrv-rs"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 description = "Rust port of MasterHttpRelayVPN -- DPI bypass via Google Apps Script relay with domain fronting"
 license = "MIT"
@@ -45,6 +45,12 @@ http = "1"
 flate2 = "1"
 directories = "5"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# libc is only referenced for the RLIMIT_NOFILE bump on Unix (issue #8 —
+# OpenWRT routers ship a very low fd limit that gets hit quickly under normal
+# traffic). Already pulled in transitively via tokio, so zero new weight.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Optional UI dep: only pulled in when --features ui is set.
 eframe = { version = "0.28", default-features = false, features = [

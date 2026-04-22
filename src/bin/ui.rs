@@ -24,6 +24,7 @@ const LOG_MAX: usize = 200;
 
 fn main() -> eframe::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    mhrv_rs::rlimit::raise_nofile_limit_best_effort();
 
     let shared = Arc::new(Shared::default());
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();

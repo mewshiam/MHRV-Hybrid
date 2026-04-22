@@ -121,6 +121,10 @@ async fn main() -> ExitCode {
     // Install default rustls crypto provider (ring).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Bump RLIMIT_NOFILE where possible — OpenWRT/Alpine hosts often ship a
+    // default so low the proxy runs out of fds under normal browser load.
+    mhrv_rs::rlimit::raise_nofile_limit_best_effort();
+
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
