@@ -1113,7 +1113,7 @@ impl eframe::App for App {
                             ),
                         ),
                         ("bytes today", fmt_bytes(s.today_bytes)),
-                        ("UTC day", s.today_key.clone()),
+                        ("PT day", s.today_key.clone()),
                         ("resets in", reset_str),
                     ];
                     egui::Grid::new("usage_today")

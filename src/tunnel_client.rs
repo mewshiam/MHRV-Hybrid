@@ -828,6 +828,35 @@ async fn fire_batch(
         match result {
             Ok(Ok(batch_resp)) => {
                 f.record_batch_success(&script_id);
+                // Wire the Full-mode usage counter that #230 / #362 flagged
+                // as stuck-at-zero. Each successful batch is one
+                // `UrlFetchApp.fetch()` call against the deploying Google
+                // account's daily quota — bytes-counted is the inbound JSON
+                // response which is the closest analogue to the apps_script
+                // path's `record_today(bytes_received)` (we don't have the
+                // exact response byte count post-deserialize, so we use a
+                // proxy: sum of per-session response payload bytes the
+                // batch carried back). Underestimates by JSON envelope
+                // overhead but is in the right order of magnitude.
+                let response_bytes: u64 = batch_resp
+                    .r
+                    .iter()
+                    .map(|r| {
+                        // `d` carries TCP payload (base64 string len ≈
+                        // 4/3 of decoded bytes; close enough); `pkts`
+                        // carries UDP datagrams (each base64); plus any
+                        // error string. Sum gives a stable proxy for
+                        // "how much did this batch move."
+                        let d = r.d.as_ref().map(|s| s.len() as u64).unwrap_or(0);
+                        let pkts = r
+                            .pkts
+                            .as_ref()
+                            .map(|v| v.iter().map(|p| p.len() as u64).sum::<u64>())
+                            .unwrap_or(0);
+                        d + pkts
+                    })
+                    .sum();
+                f.record_today(response_bytes);
                 for (idx, reply) in data_replies {
                     if let Some(resp) = batch_resp.r.get(idx) {
                         let _ = reply.send(Ok((resp.clone(), script_id.clone())));
