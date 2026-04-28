@@ -1,13 +1,26 @@
-# Apps Script source (mirrored)
+# Apps Script / Worker templates for `mhrv-rs`
 
-The file `Code.gs` next to this README is a verbatim snapshot of the upstream script you deploy in your own Google Apps Script project:
+This folder contains deploy-ready scripts used by the Rust client.
 
-- Upstream: <https://github.com/masterking32/MasterHttpRelayVPN/blob/python_testing/apps_script/Code.gs>
-- Raw link: <https://raw.githubusercontent.com/masterking32/MasterHttpRelayVPN/refs/heads/python_testing/apps_script/Code.gs>
+## Files
 
-This copy lives in our repo for two reasons:
+- `Code.gs` — upstream-compatible direct Apps Script relay.
+- `CodeFull.gs` — full-mode tunnel relay script (for `mode = "full"`).
+- `CodeHybrid.gs` — new hybrid relay script:
+  - default route: direct `UrlFetchApp` (normal Apps Script behavior)
+  - optional route: forwards selected hostnames to your Cloudflare Worker
+- `worker.js` — minimal Cloudflare Worker endpoint that accepts the same relay payload and returns `{s,h,b}`.
 
-1. **Survives upstream outages**: if the user is on a network where raw.githubusercontent.com is temporarily unreachable but they can clone or ZIP this repo, they still have the deploy-ready file.
-2. **Pins what we tested against**: the relay protocol between `mhrv-rs` and the script is informal; upstream changes can silently break us. Keeping a snapshot here lets us diff and see if a spec drift is responsible for any reported breakage.
+## When to use which
 
-All credit for `Code.gs` goes to [@masterking32](https://github.com/masterking32) — we do not modify it. If you're using mhrv-rs, follow the upstream deploy instructions in the script's header comment. The only edit **you** must make is the `AUTH_KEY` constant — set it to a strong secret and reuse that exact string in your `mhrv-rs` config.
+- Want classic setup only: deploy **`Code.gs`**.
+- Want full tunnel mode: deploy **`CodeFull.gs`**.
+- Want mixed routing (normal via Apps Script + specific hosts via CFW): deploy **`CodeHybrid.gs`** and configure:
+  - `WORKER_URL`, `CFW_HOSTS` in script
+  - `cfw_script_id` / `cfw_hosts` in `mhrv-rs` config
+
+## Security notes
+
+- Always change `AUTH_KEY` before deployment.
+- Keep Worker URL private if possible.
+- Do not share deployment IDs and auth key publicly.

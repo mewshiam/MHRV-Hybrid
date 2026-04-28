@@ -181,6 +181,8 @@ Everything the UI does is also available in the CLI. Copy `config.example.json` 
   "google_ip": "216.239.38.120",
   "front_domain": "www.google.com",
   "script_id": "PASTE_YOUR_DEPLOYMENT_ID_HERE",
+  "cfw_script_id": "OPTIONAL_CFW_APPS_SCRIPT_DEPLOYMENT_ID",
+  "cfw_hosts": ["x.com", ".twitter.com"],
   "auth_key": "same-secret-as-in-code-gs",
   "listen_host": "127.0.0.1",
   "listen_port": 8085,
@@ -189,6 +191,11 @@ Everything the UI does is also available in the CLI. Copy `config.example.json` 
   "verify_ssl": true
 }
 ```
+
+`cfw_script_id` + `cfw_hosts` are optional hybrid-routing knobs: when a request hostname matches `cfw_hosts`, `mhrv-rs` sends only that request through the CFW-backed Apps Script deployment (`assets/apps_script/CodeHybrid.gs`) and keeps everything else on the normal Apps Script deployment.
+
+
+For a clean one-repo setup, everything you need now lives under `assets/apps_script/` (Apps Script + Worker templates).
 
 Then:
 

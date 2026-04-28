@@ -3,6 +3,8 @@
   "google_ip": "216.239.38.120",
   "front_domain": "www.google.com",
   "script_id": "YOUR_APPS_SCRIPT_DEPLOYMENT_ID",
+  "cfw_script_id": "",
+  "cfw_hosts": [],
   "auth_key": "CHANGE_ME_TO_A_STRONG_SECRET",
   "listen_host": "127.0.0.1",
   "listen_port": 8085,
