@@ -62,6 +62,22 @@ pub struct Config {
     pub script_id: Option<ScriptId>,
     #[serde(default)]
     pub script_ids: Option<ScriptId>,
+    /// Optional Apps Script deployment ID(s) for Cloudflare-Worker-backed
+    /// relay scripts (`assets/apps_script/CodeHybrid.gs`). Requests to hosts matched by
+    /// `cfw_hosts` are sent to this pool instead of the default `script_id(s)`.
+    ///
+    /// Accepts either a single string or an array.
+    #[serde(default)]
+    pub cfw_script_id: Option<ScriptId>,
+    #[serde(default)]
+    pub cfw_script_ids: Option<ScriptId>,
+    /// Host routing table for "send this site through CFW-backed script IDs".
+    ///
+    /// Matching is case-insensitive. Entries support exact hostnames
+    /// ("x.com") and leading-dot suffixes (".x.com" matches all subdomains).
+    /// Requires `cfw_script_id` / `cfw_script_ids` to be set.
+    #[serde(default)]
+    pub cfw_hosts: Vec<String>,
     #[serde(default)]
     pub auth_key: String,
     #[serde(default = "default_listen_host")]
@@ -111,7 +127,7 @@ pub struct Config {
     pub max_ips_to_scan: usize,
 
     #[serde(default = "default_scan_batch_size")]
-    pub scan_batch_size:usize,
+    pub scan_batch_size: usize,
 
     #[serde(default = "default_google_ip_validation")]
     pub google_ip_validation: bool,
@@ -207,10 +223,18 @@ pub struct Config {
     pub disable_padding: bool,
 }
 
-fn default_fetch_ips_from_api() -> bool { false }
-fn default_max_ips_to_scan() -> usize { 100 }
-fn default_scan_batch_size() -> usize {500}
-fn default_google_ip_validation() -> bool {true}
+fn default_fetch_ips_from_api() -> bool {
+    false
+}
+fn default_max_ips_to_scan() -> usize {
+    100
+}
+fn default_scan_batch_size() -> usize {
+    500
+}
+fn default_google_ip_validation() -> bool {
+    true
+}
 
 fn default_google_ip() -> String {
     "216.239.38.120".into()
@@ -267,6 +291,21 @@ impl Config {
                 "scan_batch_size must be greater than 0".into(),
             ));
         }
+        if !self.cfw_hosts.is_empty() {
+            let ids = self.cfw_script_ids_resolved();
+            if ids.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "cfw_hosts is set but cfw_script_id / cfw_script_ids is missing".into(),
+                ));
+            }
+            for id in &ids {
+                if id.is_empty() || id == "YOUR_APPS_SCRIPT_DEPLOYMENT_ID" {
+                    return Err(ConfigError::Invalid(
+                        "cfw_script_id is not set — deploy assets/apps_script/CodeHybrid.gs and paste its Deployment ID".into(),
+                    ));
+                }
+            }
+        }
         if self.socks5_port == Some(self.listen_port) {
             return Err(ConfigError::Invalid(
                 "listen_port and socks5_port must be different".into(),
@@ -292,6 +331,16 @@ impl Config {
             return s.clone().into_vec();
         }
         if let Some(s) = &self.script_id {
+            return s.clone().into_vec();
+        }
+        Vec::new()
+    }
+
+    pub fn cfw_script_ids_resolved(&self) -> Vec<String> {
+        if let Some(s) = &self.cfw_script_ids {
+            return s.clone().into_vec();
+        }
+        if let Some(s) = &self.cfw_script_id {
             return s.clone().into_vec();
         }
         Vec::new()
@@ -355,7 +404,8 @@ mod tests {
             "mode": "google_only"
         }"#;
         let cfg: Config = serde_json::from_str(s).unwrap();
-        cfg.validate().expect("google_only must validate without script_id / auth_key");
+        cfg.validate()
+            .expect("google_only must validate without script_id / auth_key");
         assert_eq!(cfg.mode_kind().unwrap(), Mode::GoogleOnly);
     }
 
@@ -428,6 +478,32 @@ mod tests {
         }"#;
         let cfg: Config = serde_json::from_str(s).unwrap();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn cfw_hosts_require_cfw_script_id() {
+        let s = r#"{
+            "mode": "apps_script",
+            "auth_key": "SECRET",
+            "script_id": "MAIN",
+            "cfw_hosts": ["x.com", ".twitter.com"]
+        }"#;
+        let cfg: Config = serde_json::from_str(s).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn cfw_hosts_with_cfw_script_id_validate() {
+        let s = r#"{
+            "mode": "apps_script",
+            "auth_key": "SECRET",
+            "script_id": "MAIN",
+            "cfw_script_ids": ["CFW1", "CFW2"],
+            "cfw_hosts": ["x.com", ".twitter.com"]
+        }"#;
+        let cfg: Config = serde_json::from_str(s).unwrap();
+        assert_eq!(cfg.cfw_script_ids_resolved(), vec!["CFW1", "CFW2"]);
+        cfg.validate().unwrap();
     }
 }
 
