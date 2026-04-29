@@ -24,7 +24,7 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 
 const REPO_OWNER: &str = "therealaleph";
-const REPO_NAME: &str = "MasterHttpRelayVPN-RUST";
+const REPO_NAME: &str = "MHRV-Hybrid";
 const GITHUB_API_HOST: &str = "api.github.com";
 const GITHUB_HOST: &str = "github.com";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");

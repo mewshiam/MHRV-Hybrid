@@ -1,4 +1,4 @@
-//! HTTP Tunnel Node for MasterHttpRelayVPN "full" mode.
+//! HTTP Tunnel Node for MHRV-Hybrid "full" mode.
 //!
 //! Bridges HTTP tunnel requests (from Apps Script) to real TCP connections.
 //! Supports both single-op (`POST /tunnel`) and batch (`POST /tunnel/batch`)

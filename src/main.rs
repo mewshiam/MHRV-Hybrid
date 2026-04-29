@@ -33,7 +33,7 @@ enum Command {
 
 fn print_help() {
     println!(
-        "mhrv-rs {} — Rust port of MasterHttpRelayVPN (apps_script mode only)
+        "mhrv-rs {} — Rust port of MHRV-Hybrid (apps_script mode only)
 
 USAGE:
     mhrv-rs [OPTIONS]                  Start the proxy server (default)
