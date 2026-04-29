@@ -1,4 +1,4 @@
-name: hybrid-gs-windows-release
+name: release
 
 on:
   push:
@@ -7,112 +7,97 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (with or without v), e.g. v1.9.0 or 1.9.0'
+        description: 'Release tag (with or without v)'
         required: true
 
 permissions:
   contents: write
 
 jobs:
-  windows-release:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: mhrv-rs-linux-amd64
+            ext: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: mhrv-rs-linux-arm64
+            ext: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: mhrv-rs-linux-musl-amd64
+            ext: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: mhrv-rs-macos-amd64
+            ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: mhrv-rs-macos-arm64
+            ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-gnu
+            artifact: mhrv-rs-windows-amd64
+            ext: zip
+
+    runs-on: ${{ matrix.os }}
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Resolve release tag
-        id: ver
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            RAW='${{ inputs.tag }}'
-          else
-            RAW='${{ github.ref_name }}'
-          fi
-          RAW="${RAW#refs/tags/}"
-          RAW="${RAW#v}"
-          echo "version=$RAW" >> "$GITHUB_OUTPUT"
-          echo "tag=v$RAW" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Build binaries
+        run: cargo build --release --features ui --target ${{ matrix.target }}
 
-      - name: Build Hybrid.GS focused Windows binaries
+      - name: Package unix artifacts
+        if: runner.os != 'Windows'
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc --bin mhrv-rs
-          cargo build --release --target x86_64-pc-windows-msvc --features ui --bin mhrv-rs-ui
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/mhrv-rs dist/
+          cp target/${{ matrix.target }}/release/mhrv-rs-ui dist/
+          tar -czf ${{ matrix.artifact }}.tar.gz -C dist mhrv-rs mhrv-rs-ui
 
-      - name: Package zip
+      - name: Package windows artifacts
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/mhrv-rs.exe dist/mhrv-rs.exe
-          if (Test-Path target/x86_64-pc-windows-msvc/release/mhrv-rs-ui.exe) {
-            Copy-Item target/x86_64-pc-windows-msvc/release/mhrv-rs-ui.exe dist/mhrv-rs-ui.exe
-          }
-          Compress-Archive -Path dist/* -DestinationPath "hybrid-gs-windows-amd64-${{ steps.ver.outputs.tag }}.zip" -Force
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/mhrv-rs.exe dist/
+          Copy-Item target/${{ matrix.target }}/release/mhrv-rs-ui.exe dist/
+          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact }}.zip -Force
 
-      - name: Publish GitHub release asset
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: Hybrid.GS ${{ steps.ver.outputs.tag }}
-          files: hybrid-gs-windows-amd64-${{ steps.ver.outputs.tag }}.zip
-          draft: false
-          prerelease: false
-          generate_release_notes: true
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.${{ matrix.ext }}
 
-  refresh-releases-folder:
-    needs: windows-release
+  release:
+    needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          ref: main
-
-      - name: Resolve release tag
-        id: ver
+          path: artifacts
+      - name: Resolve tag
+        id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            RAW='${{ inputs.tag }}'
+            raw='${{ inputs.tag }}'
           else
-            RAW='${{ github.ref_name }}'
+            raw='${{ github.ref_name }}'
           fi
-          RAW="${RAW#refs/tags/}"
-          RAW="${RAW#v}"
-          echo "version=$RAW" >> "$GITHUB_OUTPUT"
-          echo "tag=v$RAW" >> "$GITHUB_OUTPUT"
-
-      - name: Download release asset
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p .tmp releases
-          gh release download "${{ steps.ver.outputs.tag }}" --pattern 'hybrid-gs-windows-amd64-*.zip' --dir .tmp
-
-      - name: Update releases folder
-        run: |
-          find releases -maxdepth 1 -type f -name '*.zip' -delete
-          cp .tmp/*.zip releases/
-
-      - name: Commit and push releases folder update
-        run: |
-          if [ -f releases/README.md ]; then
-            sed -i -E "s/Current version: \*\*v[0-9][0-9.]*\*\*/Current version: **${{ steps.ver.outputs.tag }}**/" releases/README.md || true
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add releases
-          if git diff --cached --quiet; then
-            echo "No releases changes"
-            exit 0
-          fi
-          git commit -m "chore(releases): refresh hybrid-gs windows asset for ${{ steps.ver.outputs.tag }}"
-          git push
+          raw="${raw#refs/tags/}"
+          raw="${raw#v}"
+          echo "tag=v$raw" >> "$GITHUB_OUTPUT"
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: artifacts/**/*

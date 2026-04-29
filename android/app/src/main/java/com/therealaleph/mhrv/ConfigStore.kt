@@ -92,6 +92,8 @@ data class MhrvConfig(
     val verifySsl: Boolean = true,
     val logLevel: String = "info",
     val parallelRelay: Int = 1,
+    val coalesceStepMs: Int = 40,
+    val coalesceMaxMs: Int = 1000,
     val upstreamSocks5: String = "",
 
     /**
@@ -103,6 +105,23 @@ data class MhrvConfig(
      * Issues #39, #127.
      */
     val passthroughHosts: List<String> = emptyList(),
+
+    /**
+     * Opt-out for the DoH bypass. The Rust default is to bypass DoH
+     * traffic (chrome.cloudflare-dns.com, dns.google, etc.) directly
+     * instead of routing it through the Apps Script tunnel — DoH
+     * already encrypts queries, so the tunnel was just adding ~2 s
+     * per name lookup with no real privacy gain. Set this to true to
+     * keep DoH inside the tunnel. See `src/config.rs` `tunnel_doh`.
+     */
+    val tunnelDoh: Boolean = false,
+
+    /**
+     * Extra hostnames added to the built-in DoH default list. Same
+     * matching shape as `passthroughHosts` (exact or leading-dot
+     * suffix). Use to cover private / enterprise DoH endpoints.
+     */
+    val bypassDohHosts: List<String> = emptyList(),
 
     /** VPN_TUN (everything routed) vs PROXY_ONLY (user configures per-app). */
     val connectionMode: ConnectionMode = ConnectionMode.VPN_TUN,
@@ -180,11 +199,25 @@ data class MhrvConfig(
             put("verify_ssl", verifySsl)
             put("log_level", logLevel)
             put("parallel_relay", parallelRelay)
+            if (coalesceStepMs != 40) put("coalesce_step_ms", coalesceStepMs)
+            if (coalesceMaxMs != 1000) put("coalesce_max_ms", coalesceMaxMs)
             if (upstreamSocks5.isNotBlank()) {
                 put("upstream_socks5", upstreamSocks5.trim())
             }
             if (passthroughHosts.isNotEmpty()) {
                 put("passthrough_hosts", JSONArray().apply { passthroughHosts.forEach { put(it) } })
+            }
+            if (tunnelDoh) put("tunnel_doh", true)
+            // Trim/drop-empty/dedupe before serializing — symmetric with the
+            // read-side normalization in loadFromJson(), so a user typing
+            // " doh.foo " or accidentally adding a duplicate doesn't end up
+            // in the saved JSON.
+            val cleanBypassDohHosts = bypassDohHosts
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+            if (cleanBypassDohHosts.isNotEmpty()) {
+                put("bypass_doh_hosts", JSONArray().apply { cleanBypassDohHosts.forEach { put(it) } })
             }
 
             // Phone-scoped scan defaults. We don't expose these in the UI
@@ -275,8 +308,18 @@ object ConfigStore {
         if (cfg.verifySsl != defaults.verifySsl) obj.put("verify_ssl", cfg.verifySsl)
         if (cfg.logLevel != defaults.logLevel) obj.put("log_level", cfg.logLevel)
         if (cfg.parallelRelay != defaults.parallelRelay) obj.put("parallel_relay", cfg.parallelRelay)
+        if (cfg.coalesceStepMs != defaults.coalesceStepMs) obj.put("coalesce_step_ms", cfg.coalesceStepMs)
+        if (cfg.coalesceMaxMs != defaults.coalesceMaxMs) obj.put("coalesce_max_ms", cfg.coalesceMaxMs)
         if (cfg.upstreamSocks5.isNotBlank()) obj.put("upstream_socks5", cfg.upstreamSocks5)
         if (cfg.passthroughHosts.isNotEmpty()) obj.put("passthrough_hosts", JSONArray().apply { cfg.passthroughHosts.forEach { put(it) } })
+        if (cfg.tunnelDoh != defaults.tunnelDoh) obj.put("tunnel_doh", cfg.tunnelDoh)
+        val cleanBypassDohHosts = cfg.bypassDohHosts
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        if (cleanBypassDohHosts.isNotEmpty()) {
+            obj.put("bypass_doh_hosts", JSONArray().apply { cleanBypassDohHosts.forEach { put(it) } })
+        }
 
         // Compress with DEFLATE then base64.
         val jsonBytes = obj.toString().toByteArray(Charsets.UTF_8)
@@ -363,8 +406,14 @@ object ConfigStore {
             verifySsl = obj.optBoolean("verify_ssl", true),
             logLevel = obj.optString("log_level", "info"),
             parallelRelay = obj.optInt("parallel_relay", 1),
+            coalesceStepMs = obj.optInt("coalesce_step_ms", 40),
+            coalesceMaxMs = obj.optInt("coalesce_max_ms", 1000),
             upstreamSocks5 = obj.optString("upstream_socks5", ""),
             passthroughHosts = obj.optJSONArray("passthrough_hosts")?.let { arr ->
+                buildList { for (i in 0 until arr.length()) add(arr.optString(i)) }
+            }?.filter { it.isNotBlank() }.orEmpty(),
+            tunnelDoh = obj.optBoolean("tunnel_doh", false),
+            bypassDohHosts = obj.optJSONArray("bypass_doh_hosts")?.let { arr ->
                 buildList { for (i in 0 until arr.length()) add(arr.optString(i)) }
             }?.filter { it.isNotBlank() }.orEmpty(),
             connectionMode = when (obj.optString("connection_mode", "vpn_tun")) {

@@ -62,22 +62,6 @@ pub struct Config {
     pub script_id: Option<ScriptId>,
     #[serde(default)]
     pub script_ids: Option<ScriptId>,
-    /// Optional Apps Script deployment ID(s) for Cloudflare-Worker-backed
-    /// relay scripts (`assets/apps_script/CodeHybrid.gs`). Requests to hosts matched by
-    /// `cfw_hosts` are sent to this pool instead of the default `script_id(s)`.
-    ///
-    /// Accepts either a single string or an array.
-    #[serde(default)]
-    pub cfw_script_id: Option<ScriptId>,
-    #[serde(default)]
-    pub cfw_script_ids: Option<ScriptId>,
-    /// Host routing table for "send this site through CFW-backed script IDs".
-    ///
-    /// Matching is case-insensitive. Entries support exact hostnames
-    /// ("x.com") and leading-dot suffixes (".x.com" matches all subdomains).
-    /// Requires `cfw_script_id` / `cfw_script_ids` to be set.
-    #[serde(default)]
-    pub cfw_hosts: Vec<String>,
     #[serde(default)]
     pub auth_key: String,
     #[serde(default = "default_listen_host")]
@@ -112,6 +96,14 @@ pub struct Config {
     /// script IDs.
     #[serde(default)]
     pub parallel_relay: u8,
+    /// Adaptive batch coalesce: after each op arrives, wait this many ms
+    /// for more ops before firing the batch. Resets on every arrival.
+    /// 0 = use compiled default (40ms).
+    #[serde(default)]
+    pub coalesce_step_ms: u16,
+    /// Hard cap on total coalesce wait (ms). 0 = use compiled default (1000ms).
+    #[serde(default)]
+    pub coalesce_max_ms: u16,
     /// Optional explicit SNI rotation pool for outbound TLS to `google_ip`.
     /// Empty / missing = auto-expand from `front_domain` (current default of
     /// {www, mail, drive, docs, calendar}.google.com). Set to an explicit list
@@ -127,7 +119,7 @@ pub struct Config {
     pub max_ips_to_scan: usize,
 
     #[serde(default = "default_scan_batch_size")]
-    pub scan_batch_size: usize,
+    pub scan_batch_size:usize,
 
     #[serde(default = "default_google_ip_validation")]
     pub google_ip_validation: bool,
@@ -221,20 +213,51 @@ pub struct Config {
     /// flip on your specific ISP path.
     #[serde(default)]
     pub disable_padding: bool,
+
+    /// Opt-out for the DoH bypass. Default `false` (= bypass active):
+    /// CONNECTs to well-known DoH hostnames (Cloudflare, Google, Quad9,
+    /// AdGuard, NextDNS, OpenDNS, browser-pinned variants like
+    /// `chrome.cloudflare-dns.com` and `mozilla.cloudflare-dns.com`)
+    /// skip the Apps Script tunnel and exit via plain TCP (or
+    /// `upstream_socks5` if set). DoH already encrypts the queries
+    /// themselves, so the only privacy property the tunnel was adding
+    /// is hiding *the fact that you're doing DoH* from the local
+    /// network — a marginal gain not worth the ~2 s Apps Script
+    /// round-trip cost paid on every name lookup. In Full mode this
+    /// was the dominant DNS slowdown source.
+    ///
+    /// Set `tunnel_doh: true` to keep DoH inside the tunnel. With the
+    /// bypass off, browsers that find their pinned DoH host
+    /// unreachable already fall back to OS DNS on their own, so
+    /// failure modes are graceful in either direction.
+    ///
+    /// Port-gated to TCP/443 only. A private DoH on a non-standard port
+    /// (e.g. `doh.internal.example:8443`) won't take the bypass path —
+    /// list it in `passthrough_hosts` instead, which has no port gate.
+    #[serde(default)]
+    pub tunnel_doh: bool,
+
+    /// Extra hostnames to treat as DoH endpoints in addition to the
+    /// built-in default list. Case-insensitive; entries match exactly
+    /// OR as a dot-anchored suffix unconditionally — `doh.acme.test`
+    /// covers both `doh.acme.test` and `tenant.doh.acme.test`. (Unlike
+    /// `passthrough_hosts`, no leading dot is required for suffix
+    /// matching: every legitimate subdomain of a DoH host is itself
+    /// a DoH endpoint, so the leading-dot convention would be a
+    /// footgun.) Use this to cover private/enterprise DoH resolvers
+    /// without waiting for a release.
+    ///
+    /// Inert when `tunnel_doh = true` — the bypass itself is off, so
+    /// the extras have nothing to feed. The proxy logs a warning at
+    /// startup if both are set together.
+    #[serde(default)]
+    pub bypass_doh_hosts: Vec<String>,
 }
 
-fn default_fetch_ips_from_api() -> bool {
-    false
-}
-fn default_max_ips_to_scan() -> usize {
-    100
-}
-fn default_scan_batch_size() -> usize {
-    500
-}
-fn default_google_ip_validation() -> bool {
-    true
-}
+fn default_fetch_ips_from_api() -> bool { false }
+fn default_max_ips_to_scan() -> usize { 100 }
+fn default_scan_batch_size() -> usize {500}
+fn default_google_ip_validation() -> bool {true}
 
 fn default_google_ip() -> String {
     "216.239.38.120".into()
@@ -291,25 +314,12 @@ impl Config {
                 "scan_batch_size must be greater than 0".into(),
             ));
         }
-        if !self.cfw_hosts.is_empty() {
-            let ids = self.cfw_script_ids_resolved();
-            if ids.is_empty() {
-                return Err(ConfigError::Invalid(
-                    "cfw_hosts is set but cfw_script_id / cfw_script_ids is missing".into(),
-                ));
-            }
-            for id in &ids {
-                if id.is_empty() || id == "YOUR_APPS_SCRIPT_DEPLOYMENT_ID" {
-                    return Err(ConfigError::Invalid(
-                        "cfw_script_id is not set — deploy assets/apps_script/CodeHybrid.gs and paste its Deployment ID".into(),
-                    ));
-                }
-            }
-        }
         if self.socks5_port == Some(self.listen_port) {
-            return Err(ConfigError::Invalid(
-                "listen_port and socks5_port must be different".into(),
-            ));
+            return Err(ConfigError::Invalid(format!(
+                "listen_port and socks5_port must differ on the same host \
+                 (both set to {} on {}). Change one of them in config.json.",
+                self.listen_port, self.listen_host
+            )));
         }
         Ok(())
     }
@@ -331,16 +341,6 @@ impl Config {
             return s.clone().into_vec();
         }
         if let Some(s) = &self.script_id {
-            return s.clone().into_vec();
-        }
-        Vec::new()
-    }
-
-    pub fn cfw_script_ids_resolved(&self) -> Vec<String> {
-        if let Some(s) = &self.cfw_script_ids {
-            return s.clone().into_vec();
-        }
-        if let Some(s) = &self.cfw_script_id {
             return s.clone().into_vec();
         }
         Vec::new()
@@ -404,8 +404,7 @@ mod tests {
             "mode": "google_only"
         }"#;
         let cfg: Config = serde_json::from_str(s).unwrap();
-        cfg.validate()
-            .expect("google_only must validate without script_id / auth_key");
+        cfg.validate().expect("google_only must validate without script_id / auth_key");
         assert_eq!(cfg.mode_kind().unwrap(), Mode::GoogleOnly);
     }
 
@@ -478,32 +477,6 @@ mod tests {
         }"#;
         let cfg: Config = serde_json::from_str(s).unwrap();
         assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn cfw_hosts_require_cfw_script_id() {
-        let s = r#"{
-            "mode": "apps_script",
-            "auth_key": "SECRET",
-            "script_id": "MAIN",
-            "cfw_hosts": ["x.com", ".twitter.com"]
-        }"#;
-        let cfg: Config = serde_json::from_str(s).unwrap();
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn cfw_hosts_with_cfw_script_id_validate() {
-        let s = r#"{
-            "mode": "apps_script",
-            "auth_key": "SECRET",
-            "script_id": "MAIN",
-            "cfw_script_ids": ["CFW1", "CFW2"],
-            "cfw_hosts": ["x.com", ".twitter.com"]
-        }"#;
-        let cfg: Config = serde_json::from_str(s).unwrap();
-        assert_eq!(cfg.cfw_script_ids_resolved(), vec!["CFW1", "CFW2"]);
-        cfg.validate().unwrap();
     }
 }
 

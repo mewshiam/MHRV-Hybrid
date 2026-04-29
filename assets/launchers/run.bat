@@ -61,7 +61,7 @@ if not "%UI_EXIT%"=="0" (
         echo   - antivirus blocking the exe — whitelist the folder and retry
         echo.
         echo Copy everything above and open an issue on:
-        echo   https://github.com/therealaleph/MasterHttpRelayVPN-RUST/issues
+        echo   https://github.com/therealaleph/MHRV-Hybrid/issues
         echo ---------------------------------------------------
         pause
     )

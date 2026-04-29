@@ -117,6 +117,44 @@ const YOUTUBE_RELAY_HOSTS: &[&str] = &[
     "youtubei.googleapis.com",
 ];
 
+/// Built-in list of DNS-over-HTTPS endpoints. CONNECTs to these (when
+/// `tunnel_doh` is left at the default of `false`, i.e. bypass enabled)
+/// skip the Apps Script tunnel and exit via plain TCP. Mix of the
+/// browser-pinned variants Chrome/Brave/Edge/Firefox/Safari use and the
+/// well-known public DoH providers users wire up by hand. Suffix
+/// matching means we don't need to enumerate every tenant subdomain
+/// (e.g. `*.cloudflare-dns.com` covers Workers-hosted DoH too).
+///
+/// Entries are matched case-insensitively. Both exact-match (`dns.google`)
+/// and dot-anchored suffix-match (a host whose suffix is `.cloudflare-dns.com`
+/// or which equals `cloudflare-dns.com`) are accepted — same shape as
+/// `passthrough_hosts`'s `.foo` rule.
+const DEFAULT_DOH_HOSTS: &[&str] = &[
+    // The base SLD covers every tenant subdomain via suffix matching;
+    // the browser-pinned variants below are listed for grep/discovery
+    // (so a user searching "chrome.cloudflare-dns.com" finds this list)
+    // and are technically redundant under cloudflare-dns.com.
+    "cloudflare-dns.com",
+    "chrome.cloudflare-dns.com",
+    "mozilla.cloudflare-dns.com",
+    "1dot1dot1dot1.cloudflare-dns.com",
+    "dns.google",
+    "dns.google.com",
+    "dns.quad9.net",
+    "dns11.quad9.net",
+    "dns.adguard-dns.com",
+    "unfiltered.adguard-dns.com",
+    "family.adguard-dns.com",
+    "dns.nextdns.io",
+    "doh.opendns.com",
+    "doh.cleanbrowsing.org",
+    "doh.dns.sb",
+    "dns0.eu",
+    "dns.alidns.com",
+    "doh.pub",
+    "dns.mullvad.net",
+];
+
 fn matches_sni_rewrite(host: &str, youtube_via_relay: bool) -> bool {
     let h = host.to_ascii_lowercase();
     let h = h.trim_end_matches('.');
@@ -178,6 +216,8 @@ pub struct ProxyServer {
     mitm: Arc<Mutex<MitmCertManager>>,
     rewrite_ctx: Arc<RewriteCtx>,
     tunnel_mux: Option<Arc<TunnelMux>>,
+    coalesce_step_ms: u64,
+    coalesce_max_ms: u64,
 }
 
 pub struct RewriteCtx {
@@ -199,6 +239,47 @@ pub struct RewriteCtx {
     /// callers fall back to TCP/HTTPS. See config.rs `block_quic` for
     /// the trade-off. Issue #213.
     pub block_quic: bool,
+    /// If true, route DoH CONNECTs around the Apps Script tunnel via
+    /// plain TCP. Default true via `Config::tunnel_doh = false`. See
+    /// `DEFAULT_DOH_HOSTS` and `matches_doh_host` for matching, and
+    /// config.rs `tunnel_doh` for the trade-off.
+    pub bypass_doh: bool,
+    /// User-supplied DoH hostnames added to the built-in default list.
+    /// Same matching semantics as `passthrough_hosts`.
+    pub bypass_doh_hosts: Vec<String>,
+}
+
+/// True if `host` matches a known DoH endpoint — either the built-in
+/// `DEFAULT_DOH_HOSTS` list or a user-supplied entry in `extra`. Match
+/// is case-insensitive, and entries match either exactly OR as a
+/// dot-anchored suffix unconditionally (no leading-dot requirement,
+/// unlike `passthrough_hosts`). The DoH list is *always* about a
+/// service — every legitimate tenant subdomain of `cloudflare-dns.com`
+/// or a user's private `doh.acme.test` is a DoH endpoint, so requiring
+/// users to remember to write `.doh.acme.test` would be a footgun
+/// without an obvious benefit.
+fn host_matches_doh_entry(h: &str, entry: &str) -> bool {
+    let e = entry.trim().trim_end_matches('.').to_ascii_lowercase();
+    let e = e.strip_prefix('.').unwrap_or(&e);
+    if e.is_empty() {
+        return false;
+    }
+    h == e || h.ends_with(&format!(".{}", e))
+}
+
+pub fn matches_doh_host(host: &str, extra: &[String]) -> bool {
+    let h = host.to_ascii_lowercase();
+    let h = h.trim_end_matches('.');
+    if h.is_empty() {
+        return false;
+    }
+    if DEFAULT_DOH_HOSTS
+        .iter()
+        .any(|s| host_matches_doh_entry(h, s))
+    {
+        return true;
+    }
+    extra.iter().any(|s| host_matches_doh_entry(h, s))
 }
 
 /// True if `host` matches any entry in the user's passthrough list.
@@ -258,6 +339,20 @@ impl ProxyServer {
         };
         let tls_connector = TlsConnector::from(Arc::new(tls_config));
 
+        // Surface a config combo that is otherwise silently inert: extras
+        // listed under `bypass_doh_hosts` only take effect when the bypass
+        // itself is on. A user who set `tunnel_doh: true` *and* populated
+        // the extras list almost certainly didn't mean to disable the
+        // feature their custom hosts feed into.
+        if config.tunnel_doh && !config.bypass_doh_hosts.is_empty() {
+            tracing::warn!(
+                "config: bypass_doh_hosts has {} entries but tunnel_doh=true — \
+                 the bypass is off, so the extras have no effect. Set \
+                 tunnel_doh=false (or omit it) to use them.",
+                config.bypass_doh_hosts.len()
+            );
+        }
+
         let rewrite_ctx = Arc::new(RewriteCtx {
             google_ip: config.google_ip.clone(),
             front_domain: config.front_domain.clone(),
@@ -268,6 +363,8 @@ impl ProxyServer {
             youtube_via_relay: config.youtube_via_relay,
             passthrough_hosts: config.passthrough_hosts.clone(),
             block_quic: config.block_quic,
+            bypass_doh: !config.tunnel_doh,
+            bypass_doh_hosts: config.bypass_doh_hosts.clone(),
         });
 
         let socks5_port = config.socks5_port.unwrap_or(config.listen_port + 1);
@@ -280,6 +377,8 @@ impl ProxyServer {
             mitm,
             rewrite_ctx,
             tunnel_mux: None, // initialized in run() inside the tokio runtime
+            coalesce_step_ms: if config.coalesce_step_ms > 0 { config.coalesce_step_ms as u64 } else { 40 },
+            coalesce_max_ms: if config.coalesce_max_ms > 0 { config.coalesce_max_ms as u64 } else { 1000 },
         })
     }
 
@@ -293,7 +392,7 @@ impl ProxyServer {
         // Initialize TunnelMux inside the runtime (tokio::spawn requires it).
         if self.rewrite_ctx.mode == Mode::Full {
             if let Some(f) = self.fronter.as_ref() {
-                self.tunnel_mux = Some(TunnelMux::start(f.clone()));
+                self.tunnel_mux = Some(TunnelMux::start(f.clone(), self.coalesce_step_ms, self.coalesce_max_ms));
             }
         }
 
@@ -326,6 +425,28 @@ impl ProxyServer {
                 warm_fronter.warm(n).await;
             });
         }
+
+        // Apps Script container keepalive. `warm()` above keeps the TCP
+        // pool warm at startup, but the V8 container behind UrlFetchApp
+        // goes cold after ~5min idle and costs 1-3s to wake. A periodic
+        // HEAD ping prevents the cold-start lag on the first request
+        // after a quiet pause (most visible as YouTube player stalls).
+        // Skipped in google_only mode for the same reason as warm —
+        // there's no fronter to ping.
+        //
+        // The handle is captured (not fire-and-forget) so the shutdown
+        // arm of the select! below can abort it. Without that, hitting
+        // Stop in the UI would leave the keepalive holding an
+        // Arc<DomainFronter> on stale config and pinging Apps Script
+        // every 240s — same class of bug that issue #99 hit for the
+        // accept loops.
+        let keepalive_task = if let Some(keepalive_fronter) = self.fronter.clone() {
+            tokio::spawn(async move {
+                keepalive_fronter.run_h1_keepalive().await;
+            })
+        } else {
+            tokio::spawn(async move { std::future::pending::<()>().await })
+        };
 
         let stats_task = if let Some(stats_fronter) = self.fronter.clone() {
             tokio::spawn(async move {
@@ -434,6 +555,7 @@ impl ProxyServer {
             _ = &mut shutdown_rx => {
                 tracing::info!("Shutdown signal received, stopping listeners");
                 stats_task.abort();
+                keepalive_task.abort();
                 http_task.abort();
                 socks_task.abort();
             }
@@ -507,8 +629,26 @@ async fn handle_http_client(
     tunnel_mux: Option<Arc<TunnelMux>>,
 ) -> std::io::Result<()> {
     let (head, leftover) = match read_http_head(&mut sock).await? {
-        Some(v) => v,
-        None => return Ok(()),
+        HeadReadResult::Got { head, leftover } => (head, leftover),
+        HeadReadResult::Closed => return Ok(()),
+        HeadReadResult::Oversized => {
+            // Reply with 431 instead of just dropping the socket so the
+            // browser shows a real error rather than retrying the same
+            // oversized request in a loop.
+            tracing::warn!(
+                "request head exceeds {} bytes — refusing with 431",
+                MAX_HEADER_BYTES
+            );
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 431 Request Header Fields Too Large\r\n\
+                      Connection: close\r\n\
+                      Content-Length: 0\r\n\r\n",
+                )
+                .await;
+            let _ = sock.flush().await;
+            return Ok(());
+        }
     };
 
     let (method, target, _version, _headers) = parse_request_head(&head)
@@ -1299,6 +1439,28 @@ async fn dispatch_tunnel(
         return Ok(());
     }
 
+    // 0.5. DoH bypass. DNS-over-HTTPS is the dominant per-flow DNS cost
+    //      in Full mode (every browser name lookup costs a ~2 s Apps
+    //      Script round-trip), and the tunnel adds no privacy beyond
+    //      what DoH already provides. Route known DoH hosts directly.
+    //      Port-gated to 443 so a non-TLS CONNECT to e.g. `dns.google:80`
+    //      doesn't get diverted off-tunnel by accident.
+    //      See `DEFAULT_DOH_HOSTS` and config.rs `tunnel_doh`.
+    if rewrite_ctx.bypass_doh
+        && port == 443
+        && matches_doh_host(&host, &rewrite_ctx.bypass_doh_hosts)
+    {
+        let via = rewrite_ctx.upstream_socks5.as_deref();
+        tracing::info!(
+            "dispatch {}:{} -> raw-tcp ({}) (doh bypass)",
+            host,
+            port,
+            via.unwrap_or("direct")
+        );
+        plain_tcp_passthrough(sock, &host, port, via).await;
+        return Ok(());
+    }
+
     // 1. Full tunnel mode: ALL traffic goes through the batch multiplexer
     //    (Apps Script → tunnel node → real TCP). No MITM, no cert.
     if rewrite_ctx.mode == Mode::Full {
@@ -1608,14 +1770,35 @@ fn looks_like_http(first_bytes: &[u8]) -> bool {
 /// Read an HTTP head (request line + headers) up to the first \r\n\r\n.
 /// Returns (head_bytes, leftover_after_head). The leftover may contain part
 /// of the request body already received.
-async fn read_http_head(sock: &mut TcpStream) -> std::io::Result<Option<(Vec<u8>, Vec<u8>)>> {
+/// Maximum size of an HTTP request head (request line + all headers).
+///
+/// Set to match upstream Python's `MAX_HEADER_BYTES` (64 KB,
+/// masterking32/MasterHttpRelayVPN constants.py). Real browsers
+/// virtually never exceed ~16 KB; anything past 64 KB is either a
+/// buggy client or a deliberate slowloris-style header bomb.
+/// Previously 1 MB, which let a misbehaving client allocate a lot
+/// of memory before failing.
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+
+/// Result of `read_http_head` / `read_http_head_io`.
+/// `Oversized` is distinct from other I/O errors so the caller can
+/// reply with `431 Request Header Fields Too Large` instead of just
+/// dropping the connection (which a browser would silently retry,
+/// reproducing the same problem).
+enum HeadReadResult {
+    Got { head: Vec<u8>, leftover: Vec<u8> },
+    Closed,
+    Oversized,
+}
+
+async fn read_http_head(sock: &mut TcpStream) -> std::io::Result<HeadReadResult> {
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 4096];
     loop {
         let n = sock.read(&mut tmp).await?;
         if n == 0 {
             return if buf.is_empty() {
-                Ok(None)
+                Ok(HeadReadResult::Closed)
             } else {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -1627,13 +1810,10 @@ async fn read_http_head(sock: &mut TcpStream) -> std::io::Result<Option<(Vec<u8>
         if let Some(pos) = find_headers_end(&buf) {
             let head = buf[..pos].to_vec();
             let leftover = buf[pos..].to_vec();
-            return Ok(Some((head, leftover)));
+            return Ok(HeadReadResult::Got { head, leftover });
         }
-        if buf.len() > 1024 * 1024 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "headers too large",
-            ));
+        if buf.len() > MAX_HEADER_BYTES {
+            return Ok(HeadReadResult::Oversized);
         }
     }
 }
@@ -1942,8 +2122,31 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (head, leftover) = match read_http_head_io(stream).await? {
-        Some(v) => v,
-        None => return Ok(false),
+        HeadReadResult::Got { head, leftover } => (head, leftover),
+        HeadReadResult::Closed => return Ok(false),
+        HeadReadResult::Oversized => {
+            // Inside MITM: same reasoning as the plaintext path. Return
+            // 431 over the decrypted stream so the browser surfaces a
+            // real error to the user instead of looping a connection
+            // reset, which was the symptom upstream caught (Apps Script
+            // ate malformed JSON when truncated header blocks were
+            // forwarded blindly).
+            tracing::warn!(
+                "MITM header block exceeds {} bytes — closing ({}:{})",
+                MAX_HEADER_BYTES,
+                host,
+                port
+            );
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 431 Request Header Fields Too Large\r\n\
+                      Connection: close\r\n\
+                      Content-Length: 0\r\n\r\n",
+                )
+                .await;
+            let _ = stream.flush().await;
+            return Ok(false);
+        }
     };
 
     let (method, path, _version, headers) = match parse_request_head(&head) {
@@ -2064,7 +2267,7 @@ where
     Ok(!connection_close)
 }
 
-async fn read_http_head_io<S>(stream: &mut S) -> std::io::Result<Option<(Vec<u8>, Vec<u8>)>>
+async fn read_http_head_io<S>(stream: &mut S) -> std::io::Result<HeadReadResult>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
@@ -2074,7 +2277,7 @@ where
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
             return if buf.is_empty() {
-                Ok(None)
+                Ok(HeadReadResult::Closed)
             } else {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -2086,13 +2289,10 @@ where
         if let Some(pos) = find_headers_end(&buf) {
             let head = buf[..pos].to_vec();
             let leftover = buf[pos..].to_vec();
-            return Ok(Some((head, leftover)));
+            return Ok(HeadReadResult::Got { head, leftover });
         }
-        if buf.len() > 1024 * 1024 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "headers too large",
-            ));
+        if buf.len() > MAX_HEADER_BYTES {
+            return Ok(HeadReadResult::Oversized);
         }
     }
 }
@@ -2833,5 +3033,65 @@ mod tests {
         let list = vec!["example.com.".to_string()];
         assert!(matches_passthrough("example.com", &list));
         assert!(matches_passthrough("example.com.", &list));
+    }
+
+    #[test]
+    fn doh_default_list_exact_matches() {
+        let extra: Vec<String> = vec![];
+        assert!(matches_doh_host("chrome.cloudflare-dns.com", &extra));
+        assert!(matches_doh_host("dns.google", &extra));
+        assert!(matches_doh_host("dns.quad9.net", &extra));
+        assert!(matches_doh_host("doh.opendns.com", &extra));
+    }
+
+    #[test]
+    fn doh_default_list_case_insensitive_and_trailing_dot() {
+        let extra: Vec<String> = vec![];
+        assert!(matches_doh_host("DNS.GOOGLE", &extra));
+        assert!(matches_doh_host("dns.google.", &extra));
+    }
+
+    #[test]
+    fn doh_default_list_suffix_match_for_tenant_subdomains() {
+        // `cloudflare-dns.com` is in the default list — Workers-hosted
+        // tenant DoH endpoints sit under it and should match too.
+        let extra: Vec<String> = vec![];
+        assert!(matches_doh_host("tenant.cloudflare-dns.com", &extra));
+        // But a substring match must NOT pass: `xcloudflare-dns.com` is
+        // a different domain.
+        assert!(!matches_doh_host("xcloudflare-dns.com", &extra));
+    }
+
+    #[test]
+    fn doh_default_list_unrelated_hosts_do_not_match() {
+        let extra: Vec<String> = vec![];
+        assert!(!matches_doh_host("example.com", &extra));
+        assert!(!matches_doh_host("googlevideo.com", &extra));
+        assert!(!matches_doh_host("", &extra));
+    }
+
+    #[test]
+    fn doh_extra_list_extends_default() {
+        let extra = vec![".internal-doh.example".to_string(), "doh.acme.test".to_string()];
+        // Defaults still match.
+        assert!(matches_doh_host("dns.google", &extra));
+        // User additions match.
+        assert!(matches_doh_host("doh.acme.test", &extra));
+        assert!(matches_doh_host("a.b.internal-doh.example", &extra));
+        // Unrelated still doesn't match.
+        assert!(!matches_doh_host("example.com", &extra));
+    }
+
+    #[test]
+    fn doh_extra_entries_match_subdomains_without_leading_dot() {
+        // Asymmetry footgun guard: user adds `doh.acme.test` and expects
+        // `tenant.doh.acme.test` to match too — same as `dns.google`
+        // matching `tenant.dns.google` from the default list. Unlike
+        // `passthrough_hosts`, DoH extras don't require a leading dot.
+        let extra = vec!["doh.acme.test".to_string()];
+        assert!(matches_doh_host("doh.acme.test", &extra));
+        assert!(matches_doh_host("tenant.doh.acme.test", &extra));
+        // But substring overlap must still be rejected.
+        assert!(!matches_doh_host("xdoh.acme.test", &extra));
     }
 }

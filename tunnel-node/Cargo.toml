@@ -2,7 +2,7 @@
 name = "mhrv-tunnel-node"
 version = "0.1.0"
 edition = "2021"
-description = "HTTP tunnel bridge for MasterHttpRelayVPN full mode — bridges HTTP tunnel requests to real TCP connections"
+description = "HTTP tunnel bridge for MHRV-Hybrid full mode — bridges HTTP tunnel requests to real TCP connections"
 
 [[bin]]
 name = "tunnel-node"
